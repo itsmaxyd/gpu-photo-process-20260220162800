@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  ocr_app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ocr_gpu_monitor
+    image: gtx980ti-ocr:latest
+    ports:
+      - "8501:8501"  # Streamlit Dashboard
+      - "8000:8000"  # REST API for Android clients
+    volumes:
+      - ./images:/app/watch_folder
+      - ./results.csv:/app/results.csv
+    restart: unless-stopped
+    
+    # GPU Configuration for GTX 980 Ti (Maxwell Architecture)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    
+    # Alternative GPU configuration (use if above doesn't work)
+    # runtime: nvidia
+    
+    environment:
+      # NVIDIA GPU settings
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      
+      # CUDA settings for Maxwell architecture
+      - CUDA_VISIBLE_DEVICES=0
+      
+      # Application settings
+      - WATCH_FOLDER=/app/watch_folder
+      - RESULTS_FILE=/app/results.csv
+      - POLL_INTERVAL=15
+      
+      # Performance tuning
+      - OMP_NUM_THREADS=4
+      - MKL_NUM_THREADS=4
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# Optional: Named volumes for persistence
+# volumes:
+#   ocr_results:
+#   ocr_models:
