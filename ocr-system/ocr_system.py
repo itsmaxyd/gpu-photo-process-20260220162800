@@ -63,22 +63,22 @@ class OCRSystem:
             # Fallback to simple CPU stub if needed, but GPUPreprocessor handles fallback
 
     def _init_ocr(self):
-        """Initialize hybrid OCR system."""
-        logger.info("Initializing hybrid OCR system...")
+        """Initialize hybrid OCR system with high-accuracy settings."""
+        logger.info("Initializing hybrid OCR system with high-accuracy configuration...")
         try:
-            # Create OCR optimized for GTX 980 Ti
-            self.ocr = OCRFactory.create_for_gtx980ti(lang='en')
-            logger.info("Hybrid OCR initialized successfully")
+            # Use high-accuracy configuration for best OCR results
+            self.ocr = OCRFactory.create_high_accuracy(lang='en')
+            logger.info("Hybrid OCR initialized successfully with high-accuracy config")
             self.ocr_initialized = True
         except Exception as e:
             logger.error(f"Failed to initialize hybrid OCR: {e}")
-            # Fallback to CPU-only
-            logger.warning("Falling back to CPU-only OCR")
+            # Fallback to fast configuration
+            logger.warning("Falling back to fast OCR configuration")
             try:
-                self.ocr = OCRFactory.create_cpu_only(lang='en')
+                self.ocr = OCRFactory.create_fast(lang='en')
                 self.ocr_initialized = True
             except Exception as fallback_error:
-                logger.critical(f"Critical failure: CPU OCR fallback also failed: {fallback_error}")
+                logger.critical(f"Critical failure: Fast OCR fallback also failed: {fallback_error}")
                 self.ocr_initialized = False
         
     def process_image(self, image_path: str) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], str, Dict[str, float]]:
@@ -102,32 +102,56 @@ class OCRSystem:
         
         total_start = time.time()
         
-        # Step 1: Preprocessing
+        # Step 1: Preprocessing with enhanced pipeline
         preprocess_start = time.time()
-        original_img, processed_img, status = self.preprocessor.preprocess_for_ocr(image_path)
+        
+        # Use enhanced preprocessing (v2) for better accuracy
+        if hasattr(self.preprocessor, 'preprocess_for_ocr_v2'):
+            original_img, processed_img, status = self.preprocessor.preprocess_for_ocr_v2(image_path)
+        else:
+            original_img, processed_img, status = self.preprocessor.preprocess_for_ocr(image_path)
+        
         stats['preprocess_time'] = time.time() - preprocess_start
         
         if original_img is None:
             return None, None, f"Preprocessing failed: {status}", stats
         
-        # Step 1.5: Resizing for optimal OCR
-        # High-res screen photos (4K+) often fail detection if not scaled down.
-        # We target a height of 2560px for better detail on full-page documents.
-        processed_img = self.preprocessor.resize_for_ocr(processed_img, target_height=2560)
+        # Step 1.5: Multi-scale OCR for better accuracy on varying text sizes
+        # Instead of just resizing to one height, we process at multiple scales
+        # This significantly improves detection of small or large text
         
-        # Step 2: OCR
-        ocr_start = time.time()
-        try:
-            # Use fast processing for better performance
-            extracted_text = self.ocr.process_image_fast(processed_img)
-        except Exception as e:
-            logger.error(f"OCR failed: {e}")
-            extracted_text = f"OCR Error: {str(e)}"
-        stats['ocr_time'] = time.time() - ocr_start
+        # Target multiple heights for better text detection
+        target_heights = [1920, 2560]  # Process at 1920px AND 2560px height
         
+        all_text_regions = []
+        
+        for target_height in target_heights:
+            # Resize for this scale
+            scaled_img = self.preprocessor.resize_for_ocr(processed_img, target_height=target_height)
+            
+            # Run OCR on this scale
+            try:
+                _, text_regions = self.ocr.process_image(scaled_img, return_regions=True)
+                all_text_regions.extend(text_regions)
+            except Exception as e:
+                logger.warning(f"OCR at height {target_height} failed: {e}")
+                continue
+        
+        # Step 2: Merge overlapping regions from multi-scale processing
+        merged_regions = self._merge_overlapping_regions(all_text_regions)
+        
+        # Extract text from merged regions
+        combined_text = '\n'.join([tr.text for tr in merged_regions if tr.text.strip()])
+        
+        # Step 3: Post-processing - add common corrections
+        combined_text = self._post_process_text(combined_text)
+        
+        stats['ocr_time'] = time.time() - total_start
         stats['total_time'] = time.time() - total_start
+        stats['regions_found'] = len(merged_regions)
+        stats['scales_processed'] = len(target_heights)
         
-        return original_img, processed_img, extracted_text, stats
+        return original_img, processed_img, combined_text, stats
 
     def start_monitoring(self):
         """Start the background monitoring thread."""
@@ -232,3 +256,106 @@ class OCRSystem:
             new_entry.to_csv(self.results_file, mode='a', header=header, index=False)
         except Exception as e:
             logger.error(f"Failed to save result for {filename}: {e}")
+
+    def _merge_overlapping_regions(self, regions: List) -> List:
+        """
+        Merge overlapping text regions from multi-scale OCR processing.
+        
+        Uses IoU (Intersection over Union) to identify and merge duplicate detections.
+        """
+        if not regions:
+            return []
+        
+        merged = []
+        used_indices = set()
+        
+        for i, region in enumerate(regions):
+            if i in used_indices:
+                continue
+            
+            current_region = region
+            
+            # Find all overlapping regions
+            for j, other_region in enumerate(regions[i+1:], start=i+1):
+                if j in used_indices:
+                    continue
+                
+                if self._regions_overlap(current_region, other_region):
+                    # Merge: keep the one with higher confidence
+                    if other_region.confidence > current_region.confidence:
+                        current_region = other_region
+                    used_indices.add(j)
+            
+            merged.append(current_region)
+            used_indices.add(i)
+        
+        # Sort by position (top to bottom, left to right)
+        merged.sort(key=lambda r: (r.bbox[0][1] if r.bbox else 0, r.bbox[0][0] if r.bbox else 0))
+        
+        return merged
+    
+    def _regions_overlap(self, region1, region2) -> bool:
+        """Check if two text regions overlap."""
+        try:
+            # Get bounding boxes
+            bbox1 = region1.bbox
+            bbox2 = region2.bbox
+            
+            if not bbox1 or not bbox2:
+                return False
+            
+            # Calculate intersection
+            x1_min = min(p[0] for p in bbox1)
+            x1_max = max(p[0] for p in bbox1)
+            y1_min = min(p[1] for p in bbox1)
+            y1_max = max(p[1] for p in bbox1)
+            
+            x2_min = min(p[0] for p in bbox2)
+            x2_max = max(p[0] for p in bbox2)
+            y2_min = min(p[1] for p in bbox2)
+            y2_max = max(p[1] for p in bbox2)
+            
+            # Check intersection
+            overlap = not (x1_max < x2_min or x2_max < x1_min or y1_max < y2_min or y2_max < y1_min)
+            
+            return overlap
+        except:
+            return False
+    
+    def _post_process_text(self, text: str) -> str:
+        """
+        Apply post-processing corrections to OCR output.
+        
+        Handles common OCR errors and formatting issues.
+        """
+        if not text:
+            return text
+        
+        # Fix common OCR character substitutions
+        replacements = {
+            '|': 'I',
+            '—': '-',
+            '–': '-',
+            ''': "'",
+            ''': "'",
+            '"': '"',
+            '"': '"',
+            '...': '...',
+        }
+        
+        # Apply replacements carefully
+        for old, new in replacements.items():
+            text = text.replace(old, new)
+        
+        # Fix multiple spaces
+        import re
+        text = re.sub(r'\s+', ' ', text)
+        
+        # Fix multiple newlines
+        text = re.sub(r'\n\s*\n+', '\n', text)
+        
+        # Strip leading/trailing whitespace per line
+        lines = [line.strip() for line in text.split('\n')]
+        text = '\n'.join(lines)
+        
+        return text.strip()

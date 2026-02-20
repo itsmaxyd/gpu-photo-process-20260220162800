@@ -42,8 +42,11 @@ watchdog>=2.2.0
 # Optional: Tesseract for CPU-based recognition fallback
 pytesseract>=0.3.10
 
-# Optional: EasyOCR alternative
-# easyocr>=1.6.0
+# Optional: EasyOCR alternative - often better for complex text
+easyocr>=1.6.0
+
+# Optional: Spell checker for post-processing correction
+pyspellchecker>=0.7.0
 
 # Image Processing
 Pillow>=9.0.0
