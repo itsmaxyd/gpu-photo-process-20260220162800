@@ -281,6 +281,14 @@ class HybridOCR:
                     confidence = line[1][1] if isinstance(line[1], tuple) else 1.0
                     detections.append((bbox, confidence))
                 
+            # Sort detections top-to-bottom, left-to-right
+            # bbox is [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+            # Sort primarily by Y of top-left corner, then X
+            # Note: This is a simple sort. For complex layouts, a more sophisticated
+            # line grouping algorithm would be better.
+            if detections:
+                detections.sort(key=lambda x: (x[0][0][1], x[0][0][0]))
+            
             return detections
         except Exception as e:
             logger.error(f"Text detection failed: {e}")

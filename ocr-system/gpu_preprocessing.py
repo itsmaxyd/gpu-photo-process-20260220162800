@@ -110,7 +110,58 @@ class GPUPreprocessor:
         except Exception as e:
             logger.error(f"Failed to download image from GPU: {e}")
             raise
-    
+
+    def deskew(self, image: np.ndarray) -> np.ndarray:
+        """
+        Deskew the image using minAreaRect on foreground content.
+        """
+        try:
+            # Convert to gray
+            if len(image.shape) == 3:
+                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = image
+                
+            # Invert colors (assuming black text on white background)
+            # We want white text on black background for contours
+            mean = np.mean(gray)
+            if mean > 127:
+                gray = cv2.bitwise_not(gray)
+                
+            # Threshold to get text
+            thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
+            
+            # Find all coordinates of non-zero pixels
+            coords = np.column_stack(np.where(thresh > 0))
+            
+            if len(coords) < 100: # Not enough content
+                return image
+                
+            # minAreaRect
+            # Note: OpenCV minAreaRect returns (center, (w,h), angle)
+            # Angle range depends on version, but usually [-90, 0)
+            angle = cv2.minAreaRect(coords)[-1]
+            
+            # Normalize angle to [-45, 45] to determine rotation needed to make it horizontal
+            if angle < -45:
+                angle = -(90 + angle)
+            else:
+                angle = -angle
+                
+            # Rotate only if significant skew and not outlier
+            if abs(angle) > 0.5 and abs(angle) < 45:
+                (h, w) = image.shape[:2]
+                center = (w // 2, h // 2)
+                M = cv2.getRotationMatrix2D(center, angle, 1.0)
+                rotated = cv2.warpAffine(image, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+                logger.info(f"Deskewed image by {angle:.2f} degrees")
+                return rotated
+                
+            return image
+        except Exception as e:
+            logger.warning(f"Deskew failed logic: {e}")
+            return image
+
     def preprocess_for_ocr(self, image_path: str) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], str]:
         """
         Full preprocessing pipeline optimized for OCR on screen photos.
@@ -138,6 +189,12 @@ class GPUPreprocessor:
             if img is None:
                 return None, None, f"Failed to load image: {image_path}"
             
+            # Apply deskewing before other processing
+            try:
+                img = self.deskew(img)
+            except Exception as e:
+                logger.warning(f"Deskewing failed: {e}")
+
             if self.cuda_available:
                 try:
                     processed = self._preprocess_gpu(img)
@@ -175,11 +232,13 @@ class GPUPreprocessor:
         gpu_enhanced = clahe.apply(gpu_gray)
         
         # 3. Denoise / Blur
-        gpu_blur = cv2.cuda.createGaussianFilter(
-            gpu_enhanced.type(), gpu_enhanced.type(), (3, 3), 0
-        )
-        gpu_denoised = cv2.cuda.GpuMat(gpu_enhanced.size(), gpu_enhanced.type())
-        gpu_blur.apply(gpu_enhanced, gpu_denoised)
+        # Skipping blur to preserve edge sharpness for small text
+        # gpu_blur = cv2.cuda.createGaussianFilter(
+        #     gpu_enhanced.type(), gpu_enhanced.type(), (3, 3), 0
+        # )
+        # gpu_denoised = cv2.cuda.GpuMat(gpu_enhanced.size(), gpu_enhanced.type())
+        # gpu_blur.apply(gpu_enhanced, gpu_denoised)
+        gpu_denoised = gpu_enhanced
         
         # 4. Convert back to BGR for PaddleOCR (which expects 3 channels)
         gpu_final = cv2.cuda.cvtColor(gpu_denoised, cv2.COLOR_GRAY2BGR)
@@ -256,13 +315,9 @@ class GPUPreprocessor:
             enhanced = clahe.apply(gray)
             
             # 3. Denoise
-            # This can be slow on CPU for large images, so we use a faster variant or optimized parameters
-            # fastNlMeansDenoising is good but slow.
-            # Let's use GaussianBlur as a faster alternative for simple noise reduction if needed, 
-            # or skip if speed is critical.
-            # But for OCR, noise reduction is helpful.
-            # Let's stick to a light Gaussian Blur for speed/stability balance on CPU.
-            denoised = cv2.GaussianBlur(enhanced, (3, 3), 0)
+            # SKIP BLUR for better sharpness on small text, especially if upscaling
+            # denoised = cv2.GaussianBlur(enhanced, (3, 3), 0)
+            denoised = enhanced
             
             # 4. Convert back to BGR for PaddleOCR
             final = cv2.cvtColor(denoised, cv2.COLOR_GRAY2BGR)
@@ -339,7 +394,9 @@ class GPUPreprocessor:
         new_width = int(img.shape[1] * scale)
         new_height = target_height
         
-        return cv2.resize(img, (new_width, new_height), interpolation=cv2.INTER_AREA)
+        # Use INTER_AREA for downscaling (better quality), INTER_CUBIC for upscaling
+        interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
+        return cv2.resize(img, (new_width, new_height), interpolation=interpolation)
     
     def enhance_for_screen_text(self, img: np.ndarray) -> np.ndarray:
         """

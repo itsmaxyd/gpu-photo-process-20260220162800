@@ -112,8 +112,8 @@ class OCRSystem:
         
         # Step 1.5: Resizing for optimal OCR
         # High-res screen photos (4K+) often fail detection if not scaled down.
-        # We target a height of 1024-1536px.
-        processed_img = self.preprocessor.resize_for_ocr(processed_img, target_height=1024)
+        # We target a height of 2560px for better detail on full-page documents.
+        processed_img = self.preprocessor.resize_for_ocr(processed_img, target_height=2560)
         
         # Step 2: OCR
         ocr_start = time.time()

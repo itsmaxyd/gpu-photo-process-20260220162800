@@ -1,0 +1,2 @@
+# Place images here for OCR processing
+# This directory is mounted as /app/watch_folder in the container
